@@ -1,0 +1,259 @@
+---
+title: "Convergent Cross Mapping"
+output:
+  html_notebook:
+    df_print: paged
+    toc: yes
+    toc_depth: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      message = FALSE,
+                      warning = FALSE)
+
+# Default colours for crossmapping to match those in slides.
+xmap_colours <- c("X_Y" = "red",
+                 "Y_X" = "blue")
+```
+
+```{r}
+library(rEDM)
+# library(nonlinearTseries)
+library(tseriesChaos)
+library(crqa)
+library(tidyverse)
+library(latex2exp)
+source("R/coupled_logistic_map.R")
+```
+
+# Model example
+A simple example of a nonlinear system with two variables is the coupled
+logistic map. The two variables $X$ and $Y$ have internal dynamics depending on
+the growth rates $r_X$ and $r_Y$. In addition there is interdependent
+dynamics modeled as a causal effect of $X$ on $Y$ depending on
+the coupling constant $\beta_{YX}$ and a coupling in the inverse direction depending on  $\beta_{XY}$.
+
+The model is expressed by these two equations:
+$$
+  X_{n+1} = X_n ( r_X - r_X X_{n} - \beta_{XY}Y_n)
+$$
+
+$$
+  Y_{n+1} = Y_n ( r_Y - r_Y Y_{n} - \beta_{YX}X_n)
+$$
+
+## Time series
+The model is implemented in the function `coupled_logistic_map` which can generate time series of length `N` given initial values `x0`and `y0` of the two variables and values for all the parameters in the model. To avoid transient and possible ideosyncratic dynamics in the beginning, an optional parameter `N_skip` can be set that will skip the first `N_skip` data points and then run the model for an additional `N` generations.
+```{r}
+dimension <-  2
+delay <- 1
+
+# Note the parameters here are not the exact ones used in the slides
+time_series <- coupled_logistic_map(
+  x0 = 0.2,
+  y0 = 0.6,
+  rx = 3.65,
+  ry = 3.8,
+  bxy = 0,
+  byx = 0.4,
+  N = 1000,
+  N_skip = 300
+)
+```
+
+```{r plot time series}
+ggplot(time_series, aes(x = time, y = X)) +
+  geom_point(colour = "blue") +
+  geom_line(colour = "blue") +
+  xlim(c(1, 40)) +
+  ylab("Population X") +
+  theme_classic()
+
+ggplot(time_series, aes(x = time, y = Y)) +
+  geom_point(colour = "red") +
+  geom_line(colour = "red") +
+  xlim(c(1, 40)) +
+  ylab("Population Y") +
+  theme_classic()
+```
+## Attractor reconstruction
+
+Reconstruct attractors from X and Y
+```{r}
+# Construct attractors using tseriesChaos::embedd()
+
+MX <- embedd(X, m = dimension, d = delay)
+MY <- embedd(Y, m = dimension, d = delay)
+
+# Change the column names
+colnames(MX) <- c("x", "y")
+colnames(MY) <- c("x", "y")
+```
+
+```{r}
+ggplot(as.data.frame(MX), aes(x = x, y = y)) +
+  geom_point(color = "blue") +
+  geom_point(data = as.data.frame(MY),
+             color = "red") +
+  theme_classic() +
+  coord_fixed()
+```
+
+
+## Convergent cross mapping
+```{r}
+# Perform the cross mapping. This can take some time.
+model_ccm <- CCM(dataFrame = time_series,
+                 E = dimension, tau = -delay, Tp = 0,
+                 columns = "Y", target = "X",
+                 libSizes = "20 500 10", sample = 100,
+                 random = TRUE,
+                 showPlot = TRUE)
+
+
+# Make sure the data frame has valid names (no colons)
+colnames(model_ccm) <- make.names(colnames(model_ccm))
+```
+
+Plot the result ourselves
+```{r}
+
+model_ccm_long <- model_ccm %>% 
+  rename(Y.MX = X.Y, X.MY = Y.X, L = LibSize) %>% 
+  pivot_longer(cols = c("Y.MX", "X.MY"),
+               names_to = "Crossmap",
+               values_to = "Rho")
+
+ggplot(model_ccm_long, aes(x = L, y = Rho, color = Crossmap)) +
+  geom_line(size = 1) +
+  # geom_point() +
+  scale_color_manual(values = c("blue", "red"),
+                     aesthetics = c("colour", "fill")) +
+  ylab(TeX("$\\rho$")) +
+  theme_classic()
+```
+
+# Sardine anchovy example
+```{r}
+ cmap <- CCM(dataFrame = sardine_anchovy_sst, E = 3, Tp = 0,
+             columns = "anchovy", target = "np_sst",
+             libSizes = "10 70 5", sample = 100,
+             showPlot = TRUE)
+```
+
+
+# Breath, move, heart
+```{r}
+pair2 <- read_csv("Data/pair2/Study4_G2_T4_MovementCoop.csv")
+
+# Down sample
+pair2 <- pair2 %>%
+ filter(row_number() %% 500 == 1)
+
+# Subtract baseline
+pair2$Resp1 <- pair2$Resp1 - mean(pair2$Resp1)
+pair2$Resp2 <- pair2$Resp2 - mean(pair2$Resp2)
+
+ggplot(pair2, aes(x = min, y = Resp1)) +
+  geom_line() +
+  geom_line(aes(x = min, y = Resp2), color = "red") +
+  xlim(c(min(pair2$min), 10)) +
+  theme_classic()
+
+# Make z-scores
+zscore <- function(vector) {
+  (vector - mean(vector)) / sd(vector)
+}
+
+pair2$Resp1z <- zscore(pair2$Resp1)
+pair2$HR1z <- zscore(pair2$HR1)
+
+param <- list(method = "crqa", metric = "euclidean",
+              maxlag = 20, radiusspan = 100, normalize = 0, rescale = 0,
+              mindiagline = 2, minvertline = 2, tw = 0, whiteline = FALSE,
+              recpt = FALSE , side = "both", datatype = "continuous",
+              fnnpercent = 10, typeami = "mindip")
+
+# This crashes on RStudio cloud
+embed_param <- crqa::optimizeParam(pair2$Resp1z, pair2$HR1z,
+                    par = param)
+
+tseriesChaos::mutual(pair2$Resp1z, lag.max = 20, plot = TRUE)
+tseriesChaos::mutual(pair2$HR1z, lag.max = 20, plot = TRUE)
+
+tau <- 5
+
+plot(false.nearest(series = pair2$Resp1z, 
+                   m = 15, 
+                   d = tau, 
+                   t = 1, 
+                   eps = 1))
+
+plot(false.nearest(series = pair2$HR1z, 
+                   m = 15, 
+                   d = tau, 
+                   t = 1, 
+                   eps = 1))
+
+E <- 4
+
+ggplot(pair2, aes(x = min, y = Resp1z)) +
+  geom_line() +
+  geom_line(aes(x = min, y = HR1z), color = "red") +
+  xlim(c(min(pair2$min), 10)) +
+  theme_classic()
+
+
+ggplot(pair2, aes(x = Resp1, y = Resp2)) +
+  geom_point(size = 0.1, color = "grey", alpha = 0.4) +
+  theme_classic()
+```
+
+```{r}
+pair2_ccm_data <- pair2 %>% 
+  select(Resp1z, HR1z)
+
+# Get the row numbers and add them as the first column as required by CCM
+idx <- as.numeric(rownames(pair2_ccm_data))
+pair2_ccm_data <- cbind(time = idx, pair2_ccm_data)
+
+ccm_out <- CCM(dataFrame = pair2_ccm_data, E = 4, tau = -3, Tp = 0,
+               columns = "Resp1z", target = "HR1z",
+               libSizes = "20 500 10", sample = 100,
+               random = TRUE,
+               showPlot = TRUE)
+
+# Rename columns
+ccm_out <- ccm_out %>%
+  rename(L = LibSize,
+         Resp_x_HR_1 = "Resp1z:HR1z",
+         HR_x_Resp_1 = "HR1z:Resp1z")
+```
+Make our own plot
+```{r}
+ggplot(ccm_out, aes(x = L, y = Resp_x_HR_1)) +
+  geom_line(colour = "red") +
+  geom_line(aes(x = L, y = HR_x_Resp_1), colour = "blue") +
+  ylab(TeX("$\\rho$")) +
+  theme_classic()
+```
+
+
+```{r}
+temperature <- read.table("Data/NASA/global_temp_index.txt",
+                         skip = 5, header = FALSE)
+
+colnames(temperature) <- c("Year", "T", "T_smooth")
+
+co2 <- read.table("Data/NASA/co2_mm_mlo.txt",
+                  comment.char = "#",
+                  header = FALSE)
+
+
+# Alternative
+# https://datahub.io/core/global-temp#curl
+# https://datahub.io/core/co2-fossil-global#data
+
+```
+
